@@ -26,8 +26,12 @@ Data model
   created: <ISO8601>
   updated: <ISO8601>
   aliases: <;-separated list, optional>
+  tags: <;-separated list, optional>
 
-- Body: Markdown or plain text. Links: `[[ID]]` or `[[ID Title]]`. Tags as `#tag`.
+- Body: Markdown or plain text. Links: `[[ID]]` or `[[ID Title]]`.
+- Tags: use a header line `tags: alpha; beta; gamma` (semicolon-separated). Case-insensitive.
+
+- Note: `aliases` and `tags` use semicolon separators (`;`) and are matched case-insensitively.
 
 Commands
 
@@ -36,8 +40,9 @@ Commands
 - `zk jot "TEXT…"` — create a one-liner note with a `## Jot` section prefilled; prints ID.
 - `zk open ID|alias|slug-fragment` — fuzzy-resolve (prefers exact ID, then exact alias, then unique slug/filename substring) and open.
 - `zk ls [--sort created|updated|title] [--rev] [--limit N] [--grep PATTERN]` — list notes with columns: ID, title, updated.
-- `zk find QUERY` — case-insensitive search over header (id, title, aliases, timestamps).
+- `zk find QUERY` — case-insensitive search over header (id, title, aliases, tags, timestamps).
 - `zk grep REGEX [--body]` — regex search; header-only by default; `--body` scans full text.
+- `zk tag ID "t1; t2; …"` — append tag(s) to the note header (de-duplicated, case-insensitive).
 - `zk links ID` — print outgoing link IDs from the note.
 - `zk backlinks ID` — print notes that link to the ID (scans for `[[ID]]` or `[[ID Title]]`).
 - `zk follow ID [N] [--open]` — print the Nth outgoing link’s ID (default 1); with `--open`, open it.
@@ -64,13 +69,15 @@ Examples
 export ZK_DIR=~/Zettel
 
 # Quick capture
-zk jot "Idea: inverse outline of Chapter 2 [[2025_0910_2124]] #structure"
+zk jot "Idea: inverse outline of Chapter 2 [[2025_0910_2124]]"
+zk tag 2025_0910_2124 "structure; outline"
 
 # New note
 zk new "Greitzer parameter intuition"
 
 # Find references
 zk find greitzer
+zk grep '^tags:\\s*entropy'          # header-regex; quotes needed for shell
 
 # Traverse
 zk open 2025_0910_2124
@@ -104,7 +111,8 @@ Example:
 export ZK_DIR=~/Zettel
 :
 # Quick capture
-zk jot "Idea: inverse outline of Chapter 2 [[2025_0910_2124]] #structure"
+zk jot "Idea: inverse outline of Chapter 2 [[2025_0910_2124]]"
+zk tag 2025_0910_2124 "structure; outline"
 
 # New note
 zk new "Greitzer parameter intuition"
@@ -121,5 +129,4 @@ zk follow 2025_0910_2124 --open
 zk rename 2025_0910_2124 "Compressor Surge: Greitzer Intuition"
 zk audit --dead --orphans
 zk graph --center 2025_0910_2124 --depth 2
-
 

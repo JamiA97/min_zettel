@@ -34,7 +34,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 
 ID_RE = re.compile(r"\[\[\s*([0-9]{4}_[0-9]{4}_[0-9]{4})(?:\s+[^\]]+)?\s*\]\]")
-HEADER_KEYS = ("id", "title", "created", "updated", "aliases")
+HEADER_KEYS = ("id", "title", "created", "updated", "aliases", "tags")
 
 
 @dataclass
@@ -142,6 +142,7 @@ class NoteMeta:
     path: Path
     slug: str
     mtime: float
+    tags: List[str]
 
 
 class NoteIndex:
@@ -149,11 +150,16 @@ class NoteIndex:
         self.notes = notes
         self.by_id: Dict[str, NoteMeta] = {n.id: n for n in notes}
         self.by_alias: Dict[str, List[NoteMeta]] = {}
+        self.by_tag: Dict[str, List[NoteMeta]] = {}
         for n in notes:
             for a in n.aliases:
                 key = a.strip().lower()
                 if key:
                     self.by_alias.setdefault(key, []).append(n)
+            for t in getattr(n, "tags", []):
+                key = t.strip().lower()
+                if key:
+                    self.by_tag.setdefault(key, []).append(n)
 
 
 def is_note_file(cfg: Config, p: Path) -> bool:
@@ -192,7 +198,8 @@ def parse_header(text: str) -> Tuple[Dict[str, str], int]:
 def render_header(meta: Dict[str, str]) -> str:
     out_lines = []
     for k in HEADER_KEYS:
-        if k in meta and meta[k] != "":
+        # Always include 'tags' even if empty; others skip if empty
+        if k in meta and (meta[k] != "" or k == "tags"):
             out_lines.append(f"{k}: {meta[k]}")
     return "\n".join(out_lines) + "\n\n"
 
@@ -232,9 +239,11 @@ def load_meta_from_path(cfg: Config, path: Path) -> NoteMeta:
     created = headers.get("created", now_iso(cfg))
     updated = headers.get("updated", created)
     aliases = [a.strip() for a in headers.get("aliases", "").split(";") if a.strip()]
+    tags = [t.strip() for t in headers.get("tags", "").split(";") if t.strip()]
     slug = slugify(title)
     mtime = path.stat().st_mtime if path.exists() else time.time()
-    return NoteMeta(id=nid, title=title, created=created, updated=updated, aliases=aliases, path=path, slug=slug, mtime=mtime)
+    return NoteMeta(id=nid, title=title, created=created, updated=updated,
+                    aliases=aliases, path=path, slug=slug, mtime=mtime, tags=tags)
 
 
 def infer_id_from_filename(path: Path) -> str:
@@ -328,6 +337,7 @@ def cmd_new(cfg: Config, args: argparse.Namespace) -> int:
         "created": created,
         "updated": updated,
         "aliases": aliases,
+        "tags": "",
     })
     body = ""
     if args.template:
@@ -366,6 +376,7 @@ def cmd_jot(cfg: Config, args: argparse.Namespace) -> int:
         "created": created,
         "updated": updated,
         "aliases": "",
+        "tags": "",
     })
     body = f"## Jot\n- {text}\n"
     path = cfg.dir / build_filename(cfg, nid, title)
@@ -410,7 +421,7 @@ def cmd_find(cfg: Config, args: argparse.Namespace) -> int:
     q = args.query.lower()
     res = []
     for n in idx.notes:
-        header = f"{n.id} {n.title} {';'.join(n.aliases)} {n.created} {n.updated}"
+        header = f"{n.id} {n.title} {';'.join(n.aliases)} {n.created} {n.updated} {';'.join(getattr(n, 'tags', []))}"
         if q in header.lower():
             res.append(n)
     for n in res:
@@ -529,6 +540,28 @@ def cmd_alias(cfg: Config, args: argparse.Namespace) -> int:
     if args.name not in aliases:
         aliases.append(args.name)
     headers["aliases"] = ";".join(aliases)
+    headers["updated"] = now_iso(cfg)
+    body = "\n".join(text.splitlines()[body_idx:])
+    write_text(note.path, render_header(headers) + body, bak=True)
+    return 0
+
+
+def cmd_tag(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    note = idx.by_id.get(args.id)
+    if not note:
+        print("Unknown ID", file=sys.stderr)
+        return 1
+    text = read_text(note.path)
+    headers, body_idx = parse_header(text)
+    cur = [t.strip() for t in headers.get("tags", "").split(";") if t.strip()]
+    new = [t.strip() for t in args.names.split(";") if t.strip()]
+    have = {t.lower() for t in cur}
+    for t in new:
+        if t.lower() not in have:
+            cur.append(t)
+            have.add(t.lower())
+    headers["tags"] = ";".join(cur)
     headers["updated"] = now_iso(cfg)
     body = "\n".join(text.splitlines()[body_idx:])
     write_text(note.path, render_header(headers) + body, bak=True)
@@ -699,6 +732,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("id")
     sp.add_argument("name")
     sp.set_defaults(func=cmd_alias)
+
+    sp = sub.add_parser("tag", help="Append tag(s) to header (semicolon-separated)")
+    sp.add_argument("id")
+    sp.add_argument("names", help="e.g. 'entropy; info-theory'")
+    sp.set_defaults(func=cmd_tag)
 
     sp = sub.add_parser("audit", help="Audit orphans/dead links/duplicates")
     sp.add_argument("--orphans", action="store_true")
