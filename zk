@@ -1,0 +1,728 @@
+#!/usr/bin/env python3
+"""
+zk — ultra-minimal CLI Zettelkasten
+
+Single-file, zero-dependency CLI to create, link, search, and traverse
+Markdown/text notes identified by timestamp-based IDs. Flat folder storage.
+
+Environment variables:
+  ZK_DIR (required): path to notes folder
+  EDITOR (optional): default vim (Linux), notepad (Windows)
+  ZK_EXT (optional): .md (default) or .txt
+  ZK_TIMEZONE (optional): UTC (default) or LOCAL
+  ZK_TEMPLATE_DIR (optional): enables -t templates
+
+Commands: see `zk --help` or README.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+import tempfile
+import time
+import shutil
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
+
+
+# -------- Config & Globals --------
+
+
+ID_RE = re.compile(r"\[\[\s*([0-9]{4}_[0-9]{4}_[0-9]{4})(?:\s+[^\]]+)?\s*\]\]")
+HEADER_KEYS = ("id", "title", "created", "updated", "aliases")
+
+
+@dataclass
+class Config:
+    dir: Path
+    ext: str = ".md"
+    tz: str = "UTC"  # "UTC" or "LOCAL"
+    editor: str = ""
+    template_dir: Optional[Path] = None
+
+
+def get_config() -> Config:
+    zk_dir = os.environ.get("ZK_DIR")
+    if not zk_dir:
+        print("ZK_DIR not set. Export ZK_DIR to your notes folder.", file=sys.stderr)
+        sys.exit(2)
+    d = Path(zk_dir).expanduser().resolve()
+    ext = os.environ.get("ZK_EXT", ".md").strip() or ".md"
+    if not ext.startswith("."):
+        ext = "." + ext
+    tz = os.environ.get("ZK_TIMEZONE", "UTC").upper()
+    editor = os.environ.get("EDITOR") or ("notepad" if os.name == "nt" else "vim")
+    tdir_env = os.environ.get("ZK_TEMPLATE_DIR")
+    tdir = Path(tdir_env).expanduser().resolve() if tdir_env else None
+    return Config(dir=d, ext=ext, tz=tz, editor=editor, template_dir=tdir)
+
+
+# -------- Utilities --------
+
+
+def now_iso(cfg: Config) -> str:
+    if cfg.tz == "LOCAL":
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def gen_id(cfg: Config, existing_ids: Optional[set[str]] = None) -> str:
+    # ID format: YYYY_MMDD_HHMM
+    def base(dt: datetime) -> str:
+        return dt.strftime("%Y_%m%d_%H%M")
+
+    if cfg.tz == "LOCAL":
+        dt = datetime.now().astimezone()
+    else:
+        dt = datetime.now(timezone.utc)
+    id_candidate = base(dt)
+
+    # Ensure uniqueness against existing IDs in folder
+    if existing_ids is None:
+        existing_ids = {m.id for m in scan_notes(cfg).notes}
+    attempt = 0
+    while id_candidate in existing_ids:
+        dt = dt.replace(minute=(dt.minute + 1) % 60)
+        id_candidate = base(dt)
+        attempt += 1
+        if attempt > 2000:
+            raise RuntimeError("Unable to generate unique ID")
+    return id_candidate
+
+
+def slugify(s: str) -> str:
+    s = s.lower()
+    s = re.sub(r"[\s_]+", "-", s)
+    s = re.sub(r"[^a-z0-9\-]", "", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s[:80] or "note"
+
+
+def atomic_write(path: Path, data: str, make_bak: bool = False) -> None:
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(data)
+        if make_bak:
+            bak = path.with_suffix(path.suffix + ".bak")
+            if path.exists() and not bak.exists():
+                shutil.copy2(path, bak)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def open_in_editor(cfg: Config, path: Path) -> int:
+    try:
+        return subprocess.call([cfg.editor, str(path)])
+    except FileNotFoundError:
+        print(f"Editor not found: {cfg.editor}", file=sys.stderr)
+        return 1
+
+
+# -------- Note model & scanning --------
+
+
+@dataclass
+class NoteMeta:
+    id: str
+    title: str
+    created: str
+    updated: str
+    aliases: List[str]
+    path: Path
+    slug: str
+    mtime: float
+
+
+class NoteIndex:
+    def __init__(self, notes: List[NoteMeta]):
+        self.notes = notes
+        self.by_id: Dict[str, NoteMeta] = {n.id: n for n in notes}
+        self.by_alias: Dict[str, List[NoteMeta]] = {}
+        for n in notes:
+            for a in n.aliases:
+                key = a.strip().lower()
+                if key:
+                    self.by_alias.setdefault(key, []).append(n)
+
+
+def is_note_file(cfg: Config, p: Path) -> bool:
+    return p.is_file() and p.suffix.lower() == cfg.ext.lower()
+
+
+def list_note_paths(cfg: Config) -> List[Path]:
+    try:
+        return [p for p in (cfg.dir.iterdir()) if is_note_file(cfg, p)]
+    except FileNotFoundError:
+        return []
+
+
+def parse_header(text: str) -> Tuple[Dict[str, str], int]:
+    headers: Dict[str, str] = {}
+    lines = text.splitlines()
+    idx = 0
+    for i, line in enumerate(lines):
+        if not line.strip():
+            idx = i + 1
+            break
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k = k.strip().lower()
+            v = v.strip()
+            headers[k] = v
+        else:
+            # Stop if line doesn't look like header
+            idx = i
+            break
+    else:
+        idx = len(lines)
+    return headers, idx
+
+
+def render_header(meta: Dict[str, str]) -> str:
+    out_lines = []
+    for k in HEADER_KEYS:
+        if k in meta and meta[k] != "":
+            out_lines.append(f"{k}: {meta[k]}")
+    return "\n".join(out_lines) + "\n\n"
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def write_text(path: Path, text: str, bak: bool = False) -> None:
+    atomic_write(path, text, make_bak=bak)
+
+
+def _read_header_map(path: Path) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for i in range(64):  # cap header scan to 64 lines
+                line = f.readline()
+                if line == "":
+                    break
+                if not line.strip():
+                    break
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
+                else:
+                    break
+    except Exception:
+        return {}
+    return headers
+
+
+def load_meta_from_path(cfg: Config, path: Path) -> NoteMeta:
+    headers = _read_header_map(path)
+    nid = headers.get("id") or infer_id_from_filename(path)
+    title = headers.get("title", "Untitled")
+    created = headers.get("created", now_iso(cfg))
+    updated = headers.get("updated", created)
+    aliases = [a.strip() for a in headers.get("aliases", "").split(";") if a.strip()]
+    slug = slugify(title)
+    mtime = path.stat().st_mtime if path.exists() else time.time()
+    return NoteMeta(id=nid, title=title, created=created, updated=updated, aliases=aliases, path=path, slug=slug, mtime=mtime)
+
+
+def infer_id_from_filename(path: Path) -> str:
+    base = path.stem
+    # Expect "ID_slug"
+    part = base.split("_", 3)
+    if len(part) >= 3:
+        # join first 3 components with underscores to match ID
+        return "_".join(part[:3])
+    return base
+
+
+_scan_cache: Optional[NoteIndex] = None
+
+
+def scan_notes(cfg: Config, force: bool = False) -> NoteIndex:
+    global _scan_cache
+    if _scan_cache is not None and not force:
+        return _scan_cache
+    paths = list_note_paths(cfg)
+    notes = [load_meta_from_path(cfg, p) for p in paths]
+    _scan_cache = NoteIndex(notes)
+    return _scan_cache
+
+
+def resolve_note(cfg: Config, token: str) -> NoteMeta:
+    idx = scan_notes(cfg)
+    token_l = token.strip().lower()
+    # Prefer exact ID
+    if token in idx.by_id:
+        return idx.by_id[token]
+    # Alias exact
+    alias_hits = idx.by_alias.get(token_l, [])
+    if len(alias_hits) == 1:
+        return alias_hits[0]
+    # Unique slug substring or filename substring match
+    matches = []
+    for n in idx.notes:
+        fname = n.path.name.lower()
+        if token_l in fname or token_l in n.slug:
+            matches.append(n)
+    uniq = list({m.id: m for m in matches}.values())
+    if len(uniq) == 1:
+        return uniq[0]
+    # Print candidates and exit
+    if uniq:
+        for m in uniq:
+            print(f"{m.id}\t{m.title}")
+    else:
+        print("No match.")
+    sys.exit(1)
+
+
+def build_filename(cfg: Config, nid: str, title: str) -> str:
+    return f"{nid}_{slugify(title)}{cfg.ext}"
+
+
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def extract_links(text: str) -> List[str]:
+    return [m.group(1) for m in ID_RE.finditer(text)]
+
+
+def replace_link_title(text: str, nid: str, old_title: str, new_title: str) -> str:
+    # Replace [[ID Old Title]] with [[ID New Title]] but keep [[ID]]
+    pattern = re.compile(r"\[\[\s*" + re.escape(nid) + r"\s+" + re.escape(old_title) + r"\s*\]\]")
+    return pattern.sub(f"[[{nid} {new_title}]]", text)
+
+
+# -------- Commands --------
+
+
+def cmd_id(cfg: Config, args: argparse.Namespace) -> int:
+    nid = gen_id(cfg)
+    print(nid)
+    return 0
+
+
+def cmd_new(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    nid = gen_id(cfg, set(idx.by_id.keys()))
+    title = " ".join(args.title) if args.title else "Untitled"
+    created = now_iso(cfg)
+    updated = created
+    aliases = ""
+    header = render_header({
+        "id": nid,
+        "title": title,
+        "created": created,
+        "updated": updated,
+        "aliases": aliases,
+    })
+    body = ""
+    if args.template:
+        if not cfg.template_dir:
+            print("ZK_TEMPLATE_DIR not set", file=sys.stderr)
+            return 2
+        tpath = cfg.template_dir / f"{args.template}.md"
+        if not tpath.exists():
+            print(f"Template not found: {tpath}", file=sys.stderr)
+            return 2
+        t = read_text(tpath)
+        body = t.format(ID=nid, TITLE=title, CREATED=created, UPDATED=updated)
+
+    ensure_dir(cfg.dir)
+    fname = build_filename(cfg, nid, title)
+    path = cfg.dir / fname
+    write_text(path, header + body)
+    print(nid)
+    if not args.no_open:
+        return open_in_editor(cfg, path)
+    return 0
+
+
+def cmd_jot(cfg: Config, args: argparse.Namespace) -> int:
+    # Capture into newest note today or a special inbox note? Spec: append under "## Jot" section of a new note
+    # Here: create a new note titled from first few words.
+    text = args.text
+    title = (text[:50] + ("…" if len(text) > 50 else "")).strip() or "Jot"
+    idx = scan_notes(cfg)
+    nid = gen_id(cfg, set(idx.by_id.keys()))
+    created = now_iso(cfg)
+    updated = created
+    header = render_header({
+        "id": nid,
+        "title": title,
+        "created": created,
+        "updated": updated,
+        "aliases": "",
+    })
+    body = f"## Jot\n- {text}\n"
+    path = cfg.dir / build_filename(cfg, nid, title)
+    ensure_dir(cfg.dir)
+    write_text(path, header + body)
+    print(nid)
+    return 0
+
+
+def cmd_open(cfg: Config, args: argparse.Namespace) -> int:
+    note = resolve_note(cfg, args.selector)
+    return open_in_editor(cfg, note.path)
+
+
+def cmd_ls(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    notes = idx.notes
+    if args.grep:
+        pat = args.grep.lower()
+        def match(n: NoteMeta) -> bool:
+            header = f"{n.id} {n.title} {';'.join(n.aliases)} {n.created} {n.updated}"
+            return pat in header.lower()
+        notes = [n for n in notes if match(n)]
+    key = args.sort
+    if key == "created":
+        notes.sort(key=lambda n: n.created)
+    elif key == "updated":
+        notes.sort(key=lambda n: n.updated)
+    else:
+        notes.sort(key=lambda n: n.title.lower())
+    if args.rev:
+        notes.reverse()
+    if args.limit is not None:
+        notes = notes[: args.limit]
+    for n in notes:
+        print(f"{n.id}\t{n.title}\t{n.updated}")
+    return 0
+
+
+def cmd_find(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    q = args.query.lower()
+    res = []
+    for n in idx.notes:
+        header = f"{n.id} {n.title} {';'.join(n.aliases)} {n.created} {n.updated}"
+        if q in header.lower():
+            res.append(n)
+    for n in res:
+        print(f"{n.id}\t{n.title}")
+    return 0
+
+
+def cmd_grep(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    try:
+        rgx = re.compile(args.regex)
+    except re.error as e:
+        print(f"Invalid regex: {e}", file=sys.stderr)
+        return 2
+    for n in idx.notes:
+        text = read_text(n.path)
+        headers, body_idx = parse_header(text)
+        hay = text if args.body else "\n".join(text.splitlines()[:body_idx])
+        if rgx.search(hay):
+            print(f"{n.id}\t{n.title}")
+    return 0
+
+
+def cmd_links(cfg: Config, args: argparse.Namespace) -> int:
+    note = resolve_note(cfg, args.id)
+    text = read_text(note.path)
+    ids = extract_links(text)
+    seen = set()
+    out = []
+    for i in ids:
+        if i not in seen:
+            out.append(i)
+            seen.add(i)
+    for i in out:
+        print(i)
+    return 0
+
+
+def cmd_backlinks(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    target = args.id
+    pat = re.compile(r"\[\[\s*" + re.escape(target) + r"(?:\s+[^\]]+)?\s*\]\]")
+    for n in idx.notes:
+        text = read_text(n.path)
+        if pat.search(text):
+            print(f"{n.id}\t{n.title}")
+    return 0
+
+
+def cmd_follow(cfg: Config, args: argparse.Namespace) -> int:
+    note = resolve_note(cfg, args.id)
+    text = read_text(note.path)
+    ids = extract_links(text)
+    if not ids:
+        print("")
+        return 0
+    n = args.n if args.n and args.n > 0 else 1
+    if n > len(ids):
+        print("")
+        return 0
+    dest = ids[n - 1]
+    print(dest)
+    if args.open:
+        # open resolved note if exists
+        idx = scan_notes(cfg)
+        if dest in idx.by_id:
+            return open_in_editor(cfg, idx.by_id[dest].path)
+    return 0
+
+
+def cmd_rename(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    if args.id not in idx.by_id:
+        print("Unknown ID", file=sys.stderr)
+        return 1
+    note = idx.by_id[args.id]
+    old_title = note.title
+    new_title = args.title
+    # Update header and rename file
+    text = read_text(note.path)
+    headers, body_idx = parse_header(text)
+    headers["title"] = new_title
+    headers["updated"] = now_iso(cfg)
+    body = "\n".join(text.splitlines()[body_idx:])
+    new_content = render_header(headers) + body
+    write_text(note.path, new_content, bak=True)
+    new_name = build_filename(cfg, note.id, new_title)
+    new_path = note.path.with_name(new_name)
+    if new_path != note.path:
+        if new_path.exists():
+            print(f"Target exists: {new_path}", file=sys.stderr)
+            return 1
+        note.path.rename(new_path)
+        note.path = new_path
+        note.title = new_title
+
+    # Update inbound link titles across all notes
+    pat = re.compile(r"\[\[\s*" + re.escape(note.id) + r"\s+" + re.escape(old_title) + r"\s*\]\]")
+    for other in idx.notes:
+        t = read_text(other.path)
+        if pat.search(t):
+            updated = replace_link_title(t, note.id, old_title, new_title)
+            write_text(other.path, updated, bak=True)
+    return 0
+
+
+def cmd_alias(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    note = idx.by_id.get(args.id)
+    if not note:
+        print("Unknown ID", file=sys.stderr)
+        return 1
+    text = read_text(note.path)
+    headers, body_idx = parse_header(text)
+    aliases = [a.strip() for a in headers.get("aliases", "").split(";") if a.strip()]
+    if args.name not in aliases:
+        aliases.append(args.name)
+    headers["aliases"] = ";".join(aliases)
+    headers["updated"] = now_iso(cfg)
+    body = "\n".join(text.splitlines()[body_idx:])
+    write_text(note.path, render_header(headers) + body, bak=True)
+    return 0
+
+
+def cmd_audit(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    id_set = set(n.id for n in idx.notes)
+    links_map: Dict[str, List[str]] = {}
+    backlinks: Dict[str, List[str]] = {i: [] for i in id_set}
+    for n in idx.notes:
+        text = read_text(n.path)
+        outs = extract_links(text)
+        links_map[n.id] = outs
+        for o in outs:
+            if o in backlinks:
+                backlinks[o].append(n.id)
+
+    if args.orphans:
+        for nid in sorted(id_set):
+            outs = links_map.get(nid, [])
+            ins = backlinks.get(nid, [])
+            if not outs and not ins:
+                print(f"ORPHAN\t{nid}")
+    if args.dead:
+        for src, outs in links_map.items():
+            for o in outs:
+                if o not in id_set:
+                    print(f"DEAD\t{src} -> {o}")
+    if args.dups:
+        # duplicate titles or aliases
+        titles: Dict[str, List[str]] = {}
+        alias_map: Dict[str, List[str]] = {}
+        for n in idx.notes:
+            titles.setdefault(n.title.lower(), []).append(n.id)
+            for a in n.aliases:
+                alias_map.setdefault(a.lower(), []).append(n.id)
+        for t, ids in titles.items():
+            if len(ids) > 1:
+                print(f"DUP-TITLE\t{', '.join(ids)}\t{t}")
+        for a, ids in alias_map.items():
+            if len(ids) > 1:
+                print(f"DUP-ALIAS\t{', '.join(ids)}\t{a}")
+    if not (args.orphans or args.dead or args.dups):
+        # default: run all
+        ns = argparse.Namespace(orphans=True, dead=True, dups=True)
+        return cmd_audit(cfg, ns)
+    return 0
+
+
+def cmd_graph(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    depth = args.depth
+    if not args.center:
+        print("--center ID required", file=sys.stderr)
+        return 2
+    center = args.center
+    # Build adjacency
+    adj: Dict[str, List[str]] = {}
+    for n in idx.notes:
+        outs = extract_links(read_text(n.path))
+        adj[n.id] = outs
+    # BFS
+    seen = set([center])
+    frontier = [center]
+    d = 0
+    while frontier and d < depth:
+        next_frontier = []
+        for u in frontier:
+            outs = adj.get(u, [])
+            if outs:
+                print(f"{u} -> {', '.join(outs)}")
+            for v in outs:
+                if v not in seen:
+                    seen.add(v)
+                    next_frontier.append(v)
+        frontier = next_frontier
+        d += 1
+    return 0
+
+
+def cmd_doctor(cfg: Config, args: argparse.Namespace) -> int:
+    ok = True
+    if not cfg.dir.exists():
+        print(f"ZK_DIR missing: {cfg.dir}")
+        ok = False
+    else:
+        print(f"ZK_DIR: {cfg.dir}")
+    print(f"ZK_EXT: {cfg.ext}")
+    print(f"ZK_TIMEZONE: {cfg.tz}")
+    print(f"EDITOR: {cfg.editor}")
+    idx = scan_notes(cfg)
+    print(f"notes: {len(idx.notes)}")
+    # test write permissions
+    if cfg.dir.exists():
+        try:
+            tf = cfg.dir / ".zk_write_test.tmp"
+            tf.write_text("ok", encoding="utf-8")
+            tf.unlink()
+            print("write: ok")
+        except Exception as e:
+            print(f"write: fail ({e})")
+            ok = False
+    return 0 if ok else 1
+
+
+# -------- Argparse --------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="zk", description="Ultra-minimal CLI Zettelkasten")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("id", help="Print a fresh ID")
+    sp.set_defaults(func=cmd_id)
+
+    sp = sub.add_parser("new", help="Create a new note")
+    sp.add_argument("title", nargs="*")
+    sp.add_argument("-t", "--template", help="Template name", default=None)
+    sp.add_argument("--no-open", action="store_true", help="Do not open in editor")
+    sp.set_defaults(func=cmd_new)
+
+    sp = sub.add_parser("jot", help="Quick one-liner capture")
+    sp.add_argument("text", help="Text to capture")
+    sp.set_defaults(func=cmd_jot)
+
+    sp = sub.add_parser("open", help="Open a note by ID/alias/slug")
+    sp.add_argument("selector")
+    sp.set_defaults(func=cmd_open)
+
+    sp = sub.add_parser("ls", help="List notes")
+    sp.add_argument("--sort", choices=["created", "updated", "title"], default="updated")
+    sp.add_argument("--rev", action="store_true")
+    sp.add_argument("--limit", type=int)
+    sp.add_argument("--grep", help="Substring filter")
+    sp.set_defaults(func=cmd_ls)
+
+    sp = sub.add_parser("find", help="Find by header fields")
+    sp.add_argument("query")
+    sp.set_defaults(func=cmd_find)
+
+    sp = sub.add_parser("grep", help="Regex search (header by default)")
+    sp.add_argument("regex")
+    sp.add_argument("--body", action="store_true")
+    sp.set_defaults(func=cmd_grep)
+
+    sp = sub.add_parser("links", help="Outgoing links from note")
+    sp.add_argument("id")
+    sp.set_defaults(func=cmd_links)
+
+    sp = sub.add_parser("backlinks", help="Notes that link to ID")
+    sp.add_argument("id")
+    sp.set_defaults(func=cmd_backlinks)
+
+    sp = sub.add_parser("follow", help="Print Nth outgoing link; optionally open it")
+    sp.add_argument("id")
+    sp.add_argument("n", nargs="?", type=int, default=1)
+    sp.add_argument("--open", action="store_true")
+    sp.set_defaults(func=cmd_follow)
+
+    sp = sub.add_parser("rename", help="Rename title and update inbound link titles")
+    sp.add_argument("id")
+    sp.add_argument("title")
+    sp.set_defaults(func=cmd_rename)
+
+    sp = sub.add_parser("alias", help="Append alias to header")
+    sp.add_argument("id")
+    sp.add_argument("name")
+    sp.set_defaults(func=cmd_alias)
+
+    sp = sub.add_parser("audit", help="Audit orphans/dead links/duplicates")
+    sp.add_argument("--orphans", action="store_true")
+    sp.add_argument("--dead", action="store_true")
+    sp.add_argument("--dups", action="store_true")
+    sp.set_defaults(func=cmd_audit)
+
+    sp = sub.add_parser("graph", help="Render ASCII adjacency via BFS")
+    sp.add_argument("--depth", type=int, default=1)
+    sp.add_argument("--center", required=True)
+    sp.set_defaults(func=cmd_graph)
+
+    sp = sub.add_parser("doctor", help="Validate environment")
+    sp.set_defaults(func=cmd_doctor)
+
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    cfg = get_config()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(cfg, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
