@@ -43,6 +43,8 @@ Commands
 - `zk find QUERY` — case-insensitive search over header (id, title, aliases, tags, timestamps).
 - `zk grep REGEX [--body]` — regex search; header-only by default; `--body` scans full text.
 - `zk tag ID "t1; t2; …"` — append tag(s) to the note header (de-duplicated, case-insensitive).
+- `zk taglist` — list all tags in the vault with usage counts.
+- `zk rename-tag OLD NEW` — batch-rename a tag across all notes (case-insensitive).
 - `zk links ID` — print outgoing link IDs from the note.
 - `zk backlinks ID` — print notes that link to the ID (scans for `[[ID]]` or `[[ID Title]]`).
 - `zk follow ID [N] [--open]` — print the Nth outgoing link’s ID (default 1); with `--open`, open it.
@@ -79,6 +81,12 @@ zk new "Greitzer parameter intuition"
 zk find greitzer
 zk grep '^tags:\\s*entropy'          # header-regex; quotes needed for shell
 
+# List all tags with counts
+zk taglist
+# entropy	3
+# info-theory	2
+# jot	1
+
 # Traverse
 zk open 2025_0910_2124
 zk backlinks 2025_0910_2124
@@ -86,6 +94,8 @@ zk follow 2025_0910_2124 --open
 
 # Refactor
 zk rename 2025_0910_2124 "Compressor Surge: Greitzer Intuition"
+zk rename-tag jot idea                 # batch-rename a tag (case-insensitive)
+# Renamed tag 'jot' -> 'idea' in 1 notes.
 zk audit --dead --orphans
 zk graph --center 2025_0910_2124 --depth 2
 
@@ -129,4 +139,3 @@ zk follow 2025_0910_2124 --open
 zk rename 2025_0910_2124 "Compressor Surge: Greitzer Intuition"
 zk audit --dead --orphans
 zk graph --center 2025_0910_2124 --depth 2
-

@@ -567,6 +567,50 @@ def cmd_tag(cfg: Config, args: argparse.Namespace) -> int:
     write_text(note.path, render_header(headers) + body, bak=True)
     return 0
 
+def cmd_taglist(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    counts: Dict[str, int] = {}
+    for n in idx.notes:
+        for t in getattr(n, "tags", []):
+            key = t.strip().lower()
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+    for tag in sorted(counts):
+        print(f"{tag}\t{counts[tag]}")
+    return 0
+
+def cmd_rename_tag(cfg: Config, args: argparse.Namespace) -> int:
+    idx = scan_notes(cfg)
+    old = args.old.strip().lower()
+    new = args.new.strip()
+    changed = 0
+    for n in idx.notes:
+        text = read_text(n.path)
+        headers, body_idx = parse_header(text)
+        tags = [t.strip() for t in headers.get("tags", "").split(";") if t.strip()]
+        new_tags: List[str] = []
+        modified = False
+        seen = set()
+        for t in tags:
+            if t.lower() == old:
+                if new.lower() not in seen:
+                    new_tags.append(new)
+                    seen.add(new.lower())
+                modified = True
+            else:
+                if t.lower() not in seen:
+                    new_tags.append(t)
+                    seen.add(t.lower())
+        if modified:
+            headers["tags"] = ";".join(new_tags)
+            headers["updated"] = now_iso(cfg)
+            body = "\n".join(text.splitlines()[body_idx:])
+            write_text(n.path, render_header(headers) + body, bak=True)
+            changed += 1
+    print(f"Renamed tag '{args.old}' -> '{args.new}' in {changed} notes.")
+    return 0
+
 
 def cmd_audit(cfg: Config, args: argparse.Namespace) -> int:
     idx = scan_notes(cfg)
@@ -737,6 +781,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("id")
     sp.add_argument("names", help="e.g. 'entropy; info-theory'")
     sp.set_defaults(func=cmd_tag)
+
+    sp = sub.add_parser("taglist", help="List all tags with usage counts")
+    sp.set_defaults(func=cmd_taglist)
+
+    sp = sub.add_parser("rename-tag", help="Rename a tag across all notes")
+    sp.add_argument("old")
+    sp.add_argument("new")
+    sp.set_defaults(func=cmd_rename_tag)
 
     sp = sub.add_parser("audit", help="Audit orphans/dead links/duplicates")
     sp.add_argument("--orphans", action="store_true")
