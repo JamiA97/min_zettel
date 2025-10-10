@@ -390,6 +390,32 @@ def cmd_open(cfg: Config, args: argparse.Namespace) -> int:
     note = resolve_note(cfg, args.selector)
     return open_in_editor(cfg, note.path)
 
+def cmd_path(cfg: Config, args: argparse.Namespace) -> int:
+    """
+    Print the relative path './ID_slug.md' for a note selected by ID/alias/slug fragment.
+    Exits non-zero on no match or ambiguous match (delegated to resolve_note).
+    """
+    note = resolve_note(cfg, args.selector)
+    # print a stable, renderer-friendly relative path
+    print(f"./{note.path.name}")
+    return 0
+
+
+def cmd_link(cfg: Config, args: argparse.Namespace) -> int:
+    """
+    Print a link string for the selected note.
+      --style md   -> [Title](./ID_slug.md)      (default)
+      --style wiki -> [[ID Title]]
+    """
+    note = resolve_note(cfg, args.selector)
+    # Prefer header title; fall back to slug prettified
+    title = note.title.strip() if getattr(note, "title", "").strip() else note.slug.replace("_", " ").title()
+    if args.style == "wiki":
+        print(f"[[{note.id} {title}]]")
+    else:
+        print(f"[{title}](./{note.path.name})")
+    return 0
+
 
 def cmd_ls(cfg: Config, args: argparse.Namespace) -> int:
     idx = scan_notes(cfg)
@@ -765,7 +791,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("id")
     sp.add_argument("n", nargs="?", type=int, default=1)
     sp.add_argument("--open", action="store_true")
-    sp.set_defaults(func=cmd_follow)
+
+# --- NEW: path ---
+    sp = sub.add_parser("path", help="Print relative path './ID_slug.md' for a note")
+    sp.add_argument("selector", help="ID, alias, or slug fragment")
+    sp.set_defaults(func=cmd_path)
+
+# --- NEW: link ---
+    sp = sub.add_parser("link", help="Print a Markdown or wiki link for a note")
+    sp.add_argument("selector", help="ID, alias, or slug fragment")
+    sp.add_argument("--style", choices=["md", "wiki"], default="md",
+                    help="Link style: md -> [Title](./ID_slug.md), wiki -> [[ID Title]]")
+    sp.set_defaults(func=cmd_link)
+
+
 
     sp = sub.add_parser("rename", help="Rename title and update inbound link titles")
     sp.add_argument("id")

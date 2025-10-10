@@ -33,32 +33,60 @@ Data model
 
 - Note: `aliases` and `tags` use semicolon separators (`;`) and are matched case-insensitively.
 
-Commands
+## Commands
 
 - `zk id` — print a fresh ID.
-- `zk new [TITLE…] [-t TEMPLATE] [--no-open]` — create a new note, print ID, optionally open in `$EDITOR` (default: open).
-- `zk jot "TEXT…"` — create a one-liner note with a `## Jot` section prefilled; prints ID.
-- `zk open ID|alias|slug-fragment` — fuzzy-resolve (prefers exact ID, then exact alias, then unique slug/filename substring) and open.
-- `zk ls [--sort created|updated|title] [--rev] [--limit N] [--grep PATTERN]` — list notes with columns: ID, title, updated.
-- `zk find QUERY` — case-insensitive search over header (id, title, aliases, tags, timestamps).
-- `zk grep REGEX [--body]` — regex search; header-only by default; `--body` scans full text.
-- `zk tag ID "t1; t2; …"` — append tag(s) to the note header (de-duplicated, case-insensitive).
-- `zk taglist` — list all tags in the vault with usage counts.
-- `zk rename-tag OLD NEW` — batch-rename a tag across all notes (case-insensitive).
-- `zk links ID` — print outgoing link IDs from the note.
-- `zk backlinks ID` — print notes that link to the ID (scans for `[[ID]]` or `[[ID Title]]`).
-- `zk follow ID [N] [--open]` — print the Nth outgoing link’s ID (default 1); with `--open`, open it.
-- `zk rename ID "New Title"` — update title, filename slug, and update inbound links of the form `[[ID Old Title]]` to `[[ID New Title]]` (plain `[[ID]]` unchanged). Atomic writes with `.bak`.
-- `zk alias ID "Alt Name"` — append alias to header (de-duplicated).
-- `zk audit [--orphans] [--dead] [--dups]` — report orphans (no in/out links), dead links, and duplicate titles/aliases. With no flags, runs all.
-- `zk graph --center ID [--depth N]` — ASCII adjacency; depth-limited BFS from center.
-- `zk doctor` — validate environment, print counts, test write permissions.
+- `zk new [TITLE…] [-t TEMPLATE] [--no-open]` — create a new note, print ID, optionally open in `$EDITOR`.
+- `zk jot "TEXT…"` — quick-capture a one-liner note.
+- `zk open ID|alias|slug-fragment` — fuzzy-resolve and open in `$EDITOR`.
+- `zk path QUERY` — print the relative path `./ID_slug.md` for the selected note (used by editors and scripts).
+- `zk link [--style md|wiki] QUERY` — print a formatted link:
+  - `--style md` → `[Title](./ID_slug.md)` (default; Markdown renderer-friendly)
+  - `--style wiki` → `[[ID Title]]` (legacy wiki link)
+- `zk ls [--sort created|updated|title] [--rev] [--limit N] [--grep PATTERN]` — list notes.
+- `zk find QUERY` — search headers (id, title, aliases, tags).
+- `zk grep REGEX [--body]` — regex search; `--body` scans full text.
+- `zk tag ID "t1; t2; …"` — append tag(s) to a note.
+- `zk taglist` — list all tags with counts.
+- `zk rename-tag OLD NEW` — batch-rename a tag across all notes.
+- `zk links ID` — list outgoing links.
+- `zk backlinks ID` — list notes linking to the ID.
+- `zk follow ID [N] [--open]` — follow the Nth outgoing link; open with `--open`.
+- `zk rename ID "New Title"` — update title, slug, and inbound links.
+- `zk alias ID "Alt Name"` — append an alias to a note.
+- `zk audit [--orphans] [--dead] [--dups]` — detect orphans, dead links, or duplicates.
+- `zk graph --center ID [--depth N]` — ASCII graph of connections.
+- `zk doctor` — validate environment and print stats.
+
 
 Performance
 
 - Flat folder of `.md`/`.txt` files; no database.
 - Uses lazy scans and in-process caching for directory listing and headers.
 - Fast path for backlinks and link extraction via precompiled regex.
+
+## Vim Integration
+
+A minimal Vim workflow is supported natively without plugins.
+
+### Smart `gx` link following
+- Inside Markdown notes, pressing `gx` on a link will:
+  - Open `[Title](./ID_slug.md)` or `[[ID Title]]` in a **new Vim tab**.
+  - Open `http(s)://` or image links with your system handler (`xdg-open`/`gio`).
+- Implemented by a small Vim autoload script (`~/.vim/autoload/zklink.vim`) and an `ftplugin` for Markdown.
+
+### Fast link insertion
+- `<leader>[[` — prompt for a note title/ID, insert a `[Title](./ID_slug.md)` link (default Markdown style).
+- `<leader>zl` — optional fzf-based picker if `fzf` is installed.
+- Visual mode + `<leader>[[` — wrap selected text as link label, prompt for target.
+
+### Configuration variables
+Set these in your `.vimrc`:
+```vim
+let g:zk_dir = expand('~/Zettel_Jamie')
+let g:zk_link_style = 'md'   " or 'wiki'
+
+
 
 Templates
 
@@ -101,6 +129,45 @@ zk graph --center 2025_0910_2124 --depth 2
 
 # Health
 zk doctor
+
+## Examples
+
+```bash
+export ZK_DIR=~/Zettel_Jamie
+
+# --- 1. Create and tag a new note ---
+zk new "Rapid note-taking process"
+# -> 2025_1009_1952_PN_rapid-note-taking.md
+
+zk tag 2025_1009_1952 "workflow; zettelkasten"
+
+# --- 2. Generate Markdown or wiki links ---
+zk link rapid
+# -> [Rapid Note Taking](./2025_1009_1952_PN_rapid-note-taking.md)
+
+zk link --style wiki rapid
+# -> [[2025_1009_1952 Rapid Note Taking]]
+
+# These can be pasted directly into any note or used by Vim's link inserter (<leader>[[)
+
+# --- 3. Follow a link in Vim ---
+# Move the cursor over either:
+#   [Rapid Note Taking](./2025_1009_1952_PN_rapid-note-taking.md)
+#   [[2025_1009_1952 Rapid Note Taking]]
+# Press `gx` → note opens in a new Vim tab.
+
+# --- 4. Insert links quickly from Vim ---
+# - Press <leader>[[   → prompts for a note title or ID and inserts a Markdown link.
+# - Press <leader>zl   → (optional) fzf picker if installed.
+# - In Visual mode, select text and press <leader>[[ → wraps selection as the link label.
+
+# --- 5. Check connectivity and clean-up ---
+zk backlinks 2025_1009_1952          # who links here
+zk audit --dead                      # detect any broken links
+zk graph --center 2025_1009_1952     # ASCII mini-graph of related notes
+
+
+
 ```
 
 Testing
