@@ -83,7 +83,7 @@ A minimal Vim workflow is supported natively without plugins.
 ### Configuration variables
 Set these in your `.vimrc`:
 ```vim
-let g:zk_dir = expand('~/Zettel_Jamie')
+let g:zk_dir = expand('~/Zettel')
 let g:zk_link_style = 'md'   " or 'wiki'
 
 
