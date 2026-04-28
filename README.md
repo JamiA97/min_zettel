@@ -12,6 +12,22 @@ A single-runtime-module, zero-dependency CLI to create, link, search, and traver
 - Optional Vim integration for smart link following and insertion.  
 - Templates, tags, aliases, link style choice (Markdown or wiki).
 
+## Design philosophy
+
+`min_zettel` is not trying to be a full PKM platform, a database-backed note
+system, or an editor plugin. It is a small, inspectable CLI for timestamped
+Markdown/text notes that stay as ordinary files in a flat folder.
+
+Links are deliberately simple and portable: Markdown links or wiki-style
+`[[ID Title]]` references. The goal is that you can understand the tool in one
+sitting, modify it without ceremony, and keep your notes under personal control.
+
+The public command is `min-zettel`. The shorter `zk` command remains available
+as a compatibility shortcut, but the longer name avoids confusion with mature
+projects such as `zk-org/zk`. This tool is deliberately less feature-rich than
+those projects; the tradeoff is that it is easier to inspect, adapt, and carry
+around.
+
 ## Installation
 
 From a local clone:
@@ -51,6 +67,30 @@ directly:
 
 The project remains standard-library-only at runtime. The CLI logic lives in one
 small module, with `./zk` kept as a source-checkout wrapper.
+
+## Minimal workflow demo
+
+```bash
+export ZK_DIR=~/Zettel
+
+min-zettel new "First principle" --no-open
+# prints: 2026_0428_1710
+
+min-zettel new "Linked idea" --no-open
+# prints: 2026_0428_1711
+
+min-zettel link "First principle"
+# prints: [First principle](./2026_0428_1710_first-principle.md)
+
+# user pastes that link, or [[2026_0428_1710 First principle]], into the linked idea note
+
+min-zettel backlinks 2026_0428_1710
+# prints: 2026_0428_1711    Linked idea
+
+min-zettel audit --dead
+min-zettel graph --center 2026_0428_1710 --depth 2
+min-zettel doctor
+```
 
 ## Environment
 
