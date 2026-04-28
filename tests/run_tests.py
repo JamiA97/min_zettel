@@ -5,7 +5,7 @@ import tempfile
 import subprocess
 from pathlib import Path
 from time import perf_counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +25,7 @@ def write(path: Path, text: str):
 
 
 def header(id, title):
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return (
         f"id: {id}\n"
         f"title: {title}\n"
@@ -148,4 +148,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
