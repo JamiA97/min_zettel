@@ -1,31 +1,56 @@
 zk — ultra-minimal CLI Zettelkasten
 ===================================
 
-A single-file, zero-dependency CLI to create, link, search, and traverse Markdown/text notes identified by timestamp-based IDs. Designed for speed, simplicity, and portability on Linux and Windows.
+A single-runtime-module, zero-dependency CLI to create, link, search, and traverse Markdown/text notes identified by timestamp-based IDs. Designed for speed, simplicity, and portability on Linux and Windows.
 
 ## At a glance
 
-- Single file, zero dependencies; works on Linux and Windows.  
+- Single runtime module, zero dependencies; works on Linux and Windows.
 - Flat folder of `.md`/`.txt` files; no database or hidden state (only `.bak` on edits).  
 - Timestamp IDs (`YYYY_MMDD_HHMM`) with kebab-case slugs; headers carry metadata.  
 - Fast backlinks/graph via precompiled regex and in-process caching.  
 - Optional Vim integration for smart link following and insertion.  
 - Templates, tags, aliases, link style choice (Markdown or wiki).
 
+## Installation
+
+From a local clone:
+
+```bash
+python -m pip install -e .
+```
+
+With pipx from GitHub:
+
+```bash
+pipx install git+https://github.com/JamiA97/min_zettel.git
+```
+
+This installs `min-zettel` as the preferred command. A `zk` command is also
+provided for compatibility, and `./zk` still works directly from the repo.
+
 ## Quick start
 
 ```bash
-# Install: put ./zk in your PATH and make it executable
-chmod +x zk
 export ZK_DIR=~/Zettel            # required
 export EDITOR=vim                 # optional (defaults: vim on Linux, notepad on Windows)
 
-zk new "First note"
-zk jot "Idea: inverse outline of Chapter 2 [[2025_0910_2124]]"
-zk find outline
-zk link outline                   # -> [Outline](./2025_0910_2124_outline.md)
-zk backlinks 2025_0910_2124
+min-zettel new "First note"
+min-zettel jot "Idea: inverse outline of Chapter 2 [[2025_0910_2124]]"
+min-zettel find outline
+min-zettel link outline                   # -> [Outline](./2025_0910_2124_outline.md)
+min-zettel backlinks 2025_0910_2124
 ```
+
+When working from a source checkout, you can still run the compatibility script
+directly:
+
+```bash
+./zk doctor
+```
+
+The project remains standard-library-only at runtime. The CLI logic lives in one
+small module, with `./zk` kept as a source-checkout wrapper.
 
 ## Environment
 

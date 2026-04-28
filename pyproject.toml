@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "min-zettel"
+version = "0.1.0"
+description = "Ultra-minimal, zero-dependency CLI Zettelkasten"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Jamie" }
+]
+dependencies = []
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Utilities"
+]
+
+[project.urls]
+Repository = "https://github.com/JamiA97/min_zettel"
+
+[project.scripts]
+min-zettel = "min_zettel:main"
+zk = "min_zettel:main"
+
+[tool.setuptools]
+py-modules = ["min_zettel"]
